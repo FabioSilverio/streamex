@@ -1,0 +1,63 @@
+{
+  "manifest_version": 3,
+  "name": "STREAMEX — Twitch & Kick Progress Sync",
+  "version": "1.2.1",
+  "description": "Salva automaticamente onde você parou em cada live e VOD da Twitch e da Kick, retoma do ponto exato e sincroniza com o Streamex.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*.twitch.tv/*",
+    "https://*.kick.com/*",
+    "https://*.vercel.app/*",
+    "http://localhost:3000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "STREAMEX Sync",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.twitch.tv/*",
+        "https://*.kick.com/*"
+      ],
+      "js": [
+        "content-tracker.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.vercel.app/*",
+        "http://localhost:3000/*"
+      ],
+      "js": [
+        "content-bridge.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://kick.com/*",
+        "https://www.kick.com/*"
+      ],
+      "js": [
+        "content-kick-follows.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

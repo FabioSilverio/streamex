@@ -1,0 +1,392 @@
+@import "tailwindcss";
+
+:root {
+  --background: #000000;
+  --foreground: #f5f5f7;
+  --surface: #0b0b0d;
+  --surface-elevated: #141417;
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --kick-green: #53fc18;
+  --kick-green-dim: rgba(83, 252, 24, 0.14);
+  --twitch-purple: #9146ff;
+  --twitch-purple-dim: rgba(145, 70, 255, 0.16);
+
+  /* Motion — X.com / Apple-grade crisp ease-out & drawer curves */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* Sticky chrome height: 56px nav + 1px hairline = 57px; + 40px ticker + 1px hairline = 98px */
+  --chrome-nav-h: 57px;
+  --chrome-h: 98px;
+  /* Stable player sizing baseline so hiding the sub-bar on scroll never resizes the video */
+  --player-chrome-h: 98px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-display);
+  /* Every Tailwind `transition` utility uses the strong ease-out by default */
+  --default-transition-duration: 160ms;
+  --default-transition-timing-function: var(--ease-out);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background-color: #000000;
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, sans-serif;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Native-feeling touch: no grey tap flash, no 300ms delay, no long-press text selection on controls */
+button,
+a,
+[role="button"] {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+button {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.85);
+  outline-offset: 2px;
+}
+
+/* Numbers that update live shouldn't jitter */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Press feedback: instant on pointer-down, quick release */
+.press {
+  transition-property: transform, color, background-color, border-color, opacity, box-shadow;
+  transition-duration: 160ms;
+  transition-timing-function: var(--ease-out);
+}
+.press:active {
+  transform: scale(0.97);
+  transition-duration: 90ms;
+}
+
+/* Subtle tactile press for full video cards (larger surfaces scale less) */
+.press-card {
+  transition: transform 180ms var(--ease-out);
+}
+.press-card:active {
+  transform: scale(0.985);
+  transition-duration: 100ms;
+}
+
+/* Entry for cards and list rows — CSS, so it runs off the main thread while polling.
+   --i (0–8) staggers the first cards of a grid by 35ms each. */
+.enter {
+  transition:
+    opacity 240ms var(--ease-out),
+    transform 240ms var(--ease-out);
+  transition-delay: calc(var(--i, 0) * 35ms);
+  @starting-style {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* Gated hover lift (Tailwind v4 already gates `hover:` to hover-capable pointers) */
+@media (hover: hover) and (pointer: fine) {
+  /* Keeps .enter's opacity fade + stagger (opacity is delayed, the hover lift never is). */
+  .lift {
+    transition:
+      opacity 240ms var(--ease-out),
+      transform 200ms var(--ease-out);
+    transition-delay: calc(var(--i, 0) * 35ms), 0ms;
+  }
+  .lift:hover {
+    transform: translateY(-2px);
+  }
+}
+
+/* ---------- Micro-interactions (one-shot, compositor-only) ---------- */
+
+/* Star / bookmark / "added" check: pops in when it becomes active */
+@keyframes pop {
+  0% {
+    transform: scale(0.6);
+  }
+  55% {
+    transform: scale(1.22);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.pop {
+  animation: pop 320ms var(--ease-out);
+}
+
+/* Bell: a short ring when notifications are switched on (rare action, a little delight is fine) */
+@keyframes ring-once {
+  0%,
+  100% {
+    transform: rotate(0);
+  }
+  20% {
+    transform: rotate(16deg);
+  }
+  40% {
+    transform: rotate(-12deg);
+  }
+  60% {
+    transform: rotate(7deg);
+  }
+  80% {
+    transform: rotate(-3deg);
+  }
+}
+.ring-once {
+  transform-origin: 50% 10%;
+  animation: ring-once 600ms var(--ease-out);
+}
+
+/* ---------- Page transitions (View Transitions API) ---------- */
+
+/* Thumbnail ⇄ player morph: a drawer-like curve, long enough to read the motion */
+::view-transition-group(media) {
+  animation-duration: 380ms;
+  animation-timing-function: var(--ease-drawer);
+  z-index: 10;
+}
+::view-transition-old(media),
+::view-transition-new(media) {
+  height: 100%;
+  object-fit: cover;
+  animation-duration: 380ms;
+  animation-timing-function: var(--ease-drawer);
+}
+/* Everything else: a quick crossfade with a slight rise, so the new view "settles" in */
+::view-transition-old(root) {
+  animation: 160ms var(--ease-out) both vt-fade-out;
+}
+::view-transition-new(root) {
+  animation: 260ms var(--ease-out) both vt-fade-in;
+}
+@keyframes vt-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes vt-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+/* Header, ticker and sidebar stay put while the page changes underneath */
+::view-transition-group(chrome),
+::view-transition-group(ticker),
+::view-transition-group(sidebar) {
+  animation: none;
+}
+
+/* The YouTube API swaps its mount <div> for an iframe; make that iframe fill the player box */
+.yt-mount iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+/* Header second row tucked away (player, while scrolling down): only the 57px nav row remains */
+html[data-strip-hidden] {
+  --chrome-h: 57px;
+}
+
+/* Desktop ticker — rAF driven via translate3d; reduced motion falls back to manual scroll */
+@media (prefers-reduced-motion: reduce) {
+  .ticker {
+    overflow-x: auto;
+  }
+  .ticker-track {
+    transform: none !important;
+  }
+}
+
+/* Off-screen feed cards skip layout and paint until they come near the viewport */
+article.lift {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 300px;
+}
+
+/* Scrollbars — ultra-subtle, Apple-like */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.09);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+@utility no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Materials — lighter = interactive, heavier = structural. Never stack two light ones. */
+.liquid-glass {
+  background: rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(20px) saturate(170%);
+  -webkit-backdrop-filter: blur(20px) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.14);
+}
+
+.liquid-glass-panel {
+  background: rgba(16, 16, 19, 0.92);
+  backdrop-filter: blur(32px) saturate(160%);
+  -webkit-backdrop-filter: blur(32px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.08),
+    0 30px 80px -24px rgba(0, 0, 0, 0.9);
+}
+
+/* Platform CTA — solid color layer, translucent edge */
+.liquid-glass-cta-kick,
+.liquid-glass-cta-twitch,
+.liquid-glass-cta-youtube {
+  position: relative;
+  border: 1px solid transparent;
+  transition:
+    transform 160ms var(--ease-out),
+    background-color 160ms var(--ease-out),
+    filter 160ms var(--ease-out);
+}
+.liquid-glass-cta-kick {
+  background: #53fc18;
+  color: #000;
+}
+.liquid-glass-cta-twitch {
+  background: #9146ff;
+  color: #fff;
+}
+.liquid-glass-cta-youtube {
+  background: #ff0033;
+  color: #fff;
+}
+.liquid-glass-cta-kick:hover,
+.liquid-glass-cta-twitch:hover,
+.liquid-glass-cta-youtube:hover {
+  filter: brightness(1.08);
+}
+.liquid-glass-cta-kick:active,
+.liquid-glass-cta-twitch:active,
+.liquid-glass-cta-youtube:active {
+  transform: scale(0.97);
+  transition-duration: 100ms;
+}
+
+.neon-dot-kick {
+  background-color: #53fc18;
+}
+.neon-dot-twitch {
+  background-color: #a970ff;
+}
+
+.font-display-condensed {
+  font-family: var(--font-display), var(--font-geist-sans), sans-serif;
+}
+
+/* Live dot: a gentle state indicator, not a strobe */
+@keyframes live-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.live-dot {
+  animation: live-breathe 2s ease-in-out infinite;
+}
+
+/* Scroll edge: Tailwind v4 @utility so responsive prefixes (max-sm:edge-fade) work cleanly */
+@utility edge-fade {
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 14px,
+    #000 calc(100% - 20px),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 14px,
+    #000 calc(100% - 20px),
+    transparent 100%
+  );
+}
+
+/* ---------- Accessibility ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+  .press:active,
+  .press-card:active,
+  .liquid-glass-cta-kick:active,
+  .liquid-glass-cta-twitch:active,
+  .liquid-glass-cta-youtube:active,
+  .lift:hover {
+    transform: none;
+  }
+  .enter {
+    transition: opacity 200ms ease;
+    transition-delay: 0ms;
+    @starting-style {
+      opacity: 0;
+      transform: none;
+    }
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .liquid-glass,
+  .liquid-glass-panel {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: #141417;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .liquid-glass,
+  .liquid-glass-panel {
+    background: #0b0b0d;
+    border-color: rgba(255, 255, 255, 0.5);
+  }
+}

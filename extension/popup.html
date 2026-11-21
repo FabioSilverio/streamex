@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>STREAMEX Sync</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="brand">
+        <span class="logo-text">STREAME<span class="logo-x">X</span></span>
+        <span class="badge">SYNC</span>
+      </div>
+      <div class="pulse">
+        <span class="dot"></span>
+        <span>ATIVO</span>
+      </div>
+    </header>
+
+    <main class="content">
+      <div class="section-title">
+        <span>Continuar Assistindo</span>
+        <span id="count" class="count">0</span>
+      </div>
+      <div id="list" class="list"></div>
+      <div id="empty" class="empty hidden">
+        <p>Nenhum progresso salvo ainda.</p>
+        <small>Assista qualquer live ou VOD na Twitch, Kick ou Streamex que eu guardo o segundo exato automaticamente.</small>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <button id="clear-btn" class="btn-ghost">Limpar tudo</button>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
