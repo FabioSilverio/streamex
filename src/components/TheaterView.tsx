@@ -1304,9 +1304,9 @@ export function TheaterView({
               {/* Prevent iframes from swallowing pointermove while dragging the floating PiP */}
               {isPip && draggingPip && <div className="absolute inset-0 z-30 cursor-grabbing" />}
 
-              {/* Compact hover controls over the PiP video */}
+              {/* Compact hover controls over the PiP video (desktop hover only — mobile uses the bottom bar) */}
               {isPip && !draggingPip && (
-                <div className="pointer-events-none absolute top-2 right-2 z-20 flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover/pip:opacity-100 transition-opacity duration-200">
+                <div className="pointer-events-none absolute top-2 right-2 z-20 hidden sm:flex items-center gap-1 opacity-0 group-hover/pip:opacity-100 transition-opacity duration-200">
                   {onExpandFromPip && (
                     <button
                       onClick={onExpandFromPip}
@@ -1801,11 +1801,14 @@ export function TheaterView({
                       className="press-card group w-full flex items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-white/[0.05]"
                     >
                       <div className="relative h-[54px] w-24 shrink-0 overflow-hidden rounded-lg bg-white/[0.05]">
-                        {rel.thumbnailUrl ? (
+                        {rel.thumbnailUrl && !/\/_404\/|404_processing/i.test(rel.thumbnailUrl) ? (
                           <img
                             src={rel.thumbnailUrl}
                             alt=""
                             loading="lazy"
+                            onError={(e) => {
+                              e.currentTarget.style.display = "none";
+                            }}
                             className="h-full w-full object-cover transition-transform duration-300 ease-[var(--ease-out)] group-hover:scale-[1.04]"
                           />
                         ) : (

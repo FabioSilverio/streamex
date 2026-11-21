@@ -329,18 +329,12 @@ export function FeedGrid({
                 >
                   <button onClick={() => onResumeProgress(prog)} className="press-card w-full text-left">
                     <div className="relative aspect-video w-full overflow-hidden rounded-2xl bg-[#0b0b0d] ring-1 ring-inset ring-white/[0.07]">
-                      {prog.thumbnailUrl ? (
-                        <img
-                          src={prog.thumbnailUrl}
-                          alt=""
-                          loading="lazy"
-                          className="h-full w-full object-cover transition-transform duration-300 ease-[var(--ease-out)] sm:group-hover:scale-[1.03]"
-                        />
-                      ) : (
-                        <div className="h-full w-full flex items-center justify-center">
-                          <Play className="h-7 w-7 text-white/25" />
-                        </div>
-                      )}
+                      <CardThumbnail
+                        src={prog.thumbnailUrl}
+                        fallbackAvatar={`https://unavatar.io/${prog.platform}/${prog.channelSlug}`}
+                        channelName={prog.channelName}
+                        zoomOnHover
+                      />
                       <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
                       <span className="tabular absolute bottom-3 left-3 inline-flex items-center gap-1.5 rounded-full bg-black/70 backdrop-blur px-2.5 py-1 text-[12px] font-medium text-white">
                         <Play className="h-3 w-3 fill-current" />
@@ -591,6 +585,59 @@ function EmptyState({
   );
 }
 
+function CardThumbnail({
+  src,
+  fallbackAvatar,
+  channelName,
+  zoomOnHover = false,
+}: {
+  src?: string;
+  fallbackAvatar?: string;
+  channelName: string;
+  zoomOnHover?: boolean;
+}) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const broken = !src || /\/_404\/|404_processing/i.test(src) || failedSrc === src;
+
+  if (broken) {
+    return (
+      <div className="relative flex h-full w-full items-center justify-center overflow-hidden bg-[#0e0e12]">
+        {fallbackAvatar && (
+          <img
+            src={fallbackAvatar}
+            alt=""
+            loading="lazy"
+            aria-hidden
+            className="pointer-events-none absolute inset-0 h-full w-full scale-125 object-cover opacity-20 blur-2xl saturate-150"
+          />
+        )}
+        <div className="relative flex flex-col items-center gap-2 text-white/45">
+          <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white/[0.08] ring-1 ring-inset ring-white/[0.12] backdrop-blur-md">
+            <Play className="h-4 w-4 translate-x-[1px] fill-current text-white/80" />
+          </span>
+          <span className="max-w-[180px] truncate text-[12px] font-medium text-white/60">
+            {channelName}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt=""
+      loading="lazy"
+      onError={() => setFailedSrc(src)}
+      className={cn(
+        "h-full w-full object-cover",
+        zoomOnHover &&
+          "transition-transform duration-300 ease-[var(--ease-out)] sm:group-hover:scale-[1.03]",
+      )}
+    />
+  );
+}
+
 export function FeedCard({
   item,
   progress,
@@ -655,19 +702,12 @@ export function FeedCard({
           data-vt-id={item.id}
           className="relative aspect-video w-full overflow-hidden rounded-2xl bg-[#0b0b0d] ring-1 ring-inset ring-white/[0.07]"
         >
-          {item.thumbnailUrl ? (
-            <img
-              src={item.thumbnailUrl}
-              alt=""
-              loading="lazy"
-              className="h-full w-full object-cover transition-transform duration-300 ease-[var(--ease-out)] sm:group-hover:scale-[1.03]"
-            />
-          ) : (
-            <div className="h-full w-full flex flex-col items-center justify-center gap-2 text-white/25">
-              <Play className="h-7 w-7" />
-              <span className="text-[12px]">{item.channelName}</span>
-            </div>
-          )}
+          <CardThumbnail
+            src={item.thumbnailUrl}
+            fallbackAvatar={item.channelAvatar}
+            channelName={item.channelName}
+            zoomOnHover
+          />
 
           {previewing && (
             <HoverPreview

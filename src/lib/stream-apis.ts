@@ -776,10 +776,17 @@ export async function fetchUnifiedFeed(
                 url: string;
               }>;
             };
+            const liveMatch = statuses.find(
+              (s) => s.platform === "twitch" && s.slug === meta.login && s.isLive,
+            );
             for (const v of vodsJson.data ?? []) {
-              const thumb = v.thumbnail_url
-                ? v.thumbnail_url.replace("%{width}", "640").replace("%{height}", "360")
-                : "";
+              const isProcessingThumb =
+                !v.thumbnail_url || /\/_404\/|404_processing/i.test(v.thumbnail_url);
+              // Twitch returns a 403 `404_processing` URL for in-progress / freshly ended VODs.
+              // Fall back to the live stream preview while live, or empty (clean poster) otherwise.
+              const thumb = isProcessingThumb
+                ? liveMatch?.thumbnailUrl || ""
+                : v.thumbnail_url.replace("%{width}", "640").replace("%{height}", "360");
               items.push({
                 id: `twitch:vod:${v.id}`,
                 platform: "twitch",
