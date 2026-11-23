@@ -256,6 +256,8 @@ export function TheaterView({
 
   const twitchContainerRef = useRef<HTMLDivElement | null>(null);
   const twitchPlayerRef = useRef<TwitchPlayerInstance | null>(null);
+  const playerBoxRef = useRef<HTMLDivElement | null>(null);
+  const [twitchPipScale, setTwitchPipScale] = useState(1);
   const ytMountRef = useRef<HTMLDivElement | null>(null);
   const ytPlayerRef = useRef<YTPlayer | null>(null);
   const hlsVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -275,6 +277,24 @@ export function TheaterView({
     if (dur > 0 && progress.currentTime / dur >= FINISHED_AT) return 0;
     return Math.floor(progress.currentTime);
   });
+  const [twitchStartAt, setTwitchStartAt] = useState(resumeTarget);
+  const [twitchReloadKey, setTwitchReloadKey] = useState(0);
+  const twitchRestartingRef = useRef(false);
+
+  // Twitch embeds refuse to play below 400×300; when minimized to PiP, keep the iframe 640×360
+  // and CSS-scale it down to fit the PiP box (zero unmount/reload).
+  useEffect(() => {
+    if (!isPip || item.platform !== "twitch") return;
+    const el = playerBoxRef.current;
+    if (!el) return;
+    const update = () => {
+      if (el.clientWidth > 0) setTwitchPipScale(el.clientWidth / 640);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [isPip, item.platform]);
   const latestProgressRef = useRef(progress);
   useEffect(() => {
     latestProgressRef.current = progress;
@@ -474,6 +494,7 @@ export function TheaterView({
     const container = twitchContainerRef.current;
     if (!container) return;
 
+    twitchRestartingRef.current = false;
     let destroyed = false;
     let tick: number | null = null;
     let lastPersistAt = 0;
@@ -527,6 +548,7 @@ export function TheaterView({
     };
 
     const flush = (fromEnded = false) => {
+      if (twitchRestartingRef.current) return;
       capturePrefs();
       const r = read();
       if (!r || r.t <= MIN_RESUME_SECONDS || !canSave(r.t)) return;
@@ -551,19 +573,21 @@ export function TheaterView({
         };
         if (isVod && item.videoId) {
           options.video = item.videoId.replace(/^v/i, "");
-          if (resumeTarget > 0) {
-            const h = Math.floor(resumeTarget / 3600);
-            const m = Math.floor((resumeTarget % 3600) / 60);
-            const s = resumeTarget % 60;
-            options.time = `${h}h${m}m${s}s`;
-            setResumedFrom(resumeTarget);
-          }
+          // ALWAYS pass `time` explicitly (even `0h0m0s`)! When omitted, Twitch's iframe resumes
+          // from Twitch's own cached timestamp — which often jumps straight to the end of the VOD.
+          const startSec = Math.max(0, Math.floor(twitchStartAt));
+          const h = Math.floor(startSec / 3600);
+          const m = Math.floor((startSec % 3600) / 60);
+          const s = startSec % 60;
+          options.time = `${h}h${m}m${s}s`;
+          if (startSec > 0) setResumedFrom(startSec);
         } else {
           options.channel = item.channelSlug;
         }
 
         const player = new window.Twitch.Player(container, options);
         twitchPlayerRef.current = player;
+        let forcedStartReset = false;
 
         const applyPrefs = () => {
           try {
@@ -575,11 +599,32 @@ export function TheaterView({
           }
         };
 
+        const guardUnexpectedEnd = () => {
+          // If Twitch still jumped near the end of a VOD we asked to start from 0:00, force seek(0).
+          if (!isVod || twitchStartAt > 0 || forcedStartReset || playedSecondsRef.current > 5)
+            return;
+          const r = read();
+          if (r && r.d > 60 && r.t > r.d * 0.85) {
+            forcedStartReset = true;
+            try {
+              player.seek(0);
+              player.play();
+            } catch {
+              // ignore
+            }
+          }
+        };
+
         player.addEventListener(window.Twitch.Player.READY, applyPrefs);
         if (window.Twitch.Player.VIDEO_READY) {
-          player.addEventListener(window.Twitch.Player.VIDEO_READY, applyPrefs);
+          player.addEventListener(window.Twitch.Player.VIDEO_READY, () => {
+            applyPrefs();
+            guardUnexpectedEnd();
+          });
         }
         player.addEventListener(window.Twitch.Player.PLAYING, () => {
+          if (!destroyed) setPlayerError(false);
+          guardUnexpectedEnd();
           if (!appliedOnPlay) {
             appliedOnPlay = true;
             applyPrefs();
@@ -597,17 +642,39 @@ export function TheaterView({
           });
         }
         if (window.Twitch.Player.ERROR) {
-          player.addEventListener(window.Twitch.Player.ERROR, () => {
-            if (!destroyed) setPlayerError(true);
+          const FATAL_TWITCH_CODES = new Set([1, 5, 6, 5000, 8001, 8003]);
+          player.addEventListener(window.Twitch.Player.ERROR, (err) => {
+            const code =
+              typeof err === "number"
+                ? err
+                : (err as { code?: number } | null | undefined)?.code;
+            // Only show the blocking fallback for genuinely fatal Twitch errors (ignore WarnAuth/transient retries).
+            if (!destroyed && typeof code === "number" && FATAL_TWITCH_CODES.has(code)) {
+              setPlayerError(true);
+            }
           });
         }
         player.addEventListener(window.Twitch.Player.PAUSE, () => flush(false));
-        player.addEventListener(window.Twitch.Player.ENDED, () => flush(true));
+        player.addEventListener(window.Twitch.Player.ENDED, () => {
+          // If Twitch immediately fired ENDED right after opening a VOD from 0:00, recover by seeking to 0.
+          if (isVod && twitchStartAt === 0 && !forcedStartReset && playedSecondsRef.current < 5) {
+            forcedStartReset = true;
+            try {
+              player.seek(0);
+              player.play();
+              return;
+            } catch {
+              // fall through
+            }
+          }
+          flush(true);
+        });
 
         tick = window.setInterval(() => {
           capturePrefs();
           const r = read();
           if (!r || r.t <= 1) return;
+          guardUnexpectedEnd();
           if (r.t > lastT && r.t - lastT < 3) playedSecondsRef.current += r.t - lastT;
           lastT = r.t;
           setCurrentTime(r.t);
@@ -647,13 +714,14 @@ export function TheaterView({
       container.innerHTML = "";
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [item.id]);
+  }, [item.id, twitchReloadKey]);
 
   // 1b) YouTube (live + uploads) through the IFrame Player API, for progress + seeking + prefs
   useEffect(() => {
     if (item.platform !== "youtube" || !item.videoId) return;
     const mount = ytMountRef.current;
     if (!mount) return;
+    twitchRestartingRef.current = false;
     let destroyed = false;
     let tick: number | null = null;
     let lastPersistAt = 0;
@@ -990,11 +1058,31 @@ export function TheaterView({
     const clean = Math.max(0, Math.floor(seconds));
     saveArmedRef.current = true; // the user picked this position on purpose
     markedWatchedInSessionRef.current = false;
+    prevMarkedWatchedRef.current = false;
+    if (clean === 0) setResumedFrom(null);
     setCurrentTime(clean);
-    try {
-      twitchPlayerRef.current?.seek(clean);
-    } catch {
-      // live streams can't seek
+    if (item.platform === "twitch" && isVod) {
+      if (clean === 0) {
+        // Twitch ignores seek(0) when stuck on its post-VOD end screen — cleanly reload at 0h0m0s.
+        twitchRestartingRef.current = true;
+        setPlayerError(false);
+        setTwitchStartAt(0);
+        setTwitchReloadKey((k) => k + 1);
+      } else {
+        try {
+          twitchPlayerRef.current?.seek(clean);
+          twitchPlayerRef.current?.play();
+        } catch {
+          // live streams can't seek
+        }
+      }
+    } else {
+      try {
+        twitchPlayerRef.current?.seek(clean);
+        twitchPlayerRef.current?.play();
+      } catch {
+        // live streams can't seek
+      }
     }
     if (hlsVideoRef.current) hlsVideoRef.current.currentTime = clean;
     try {
@@ -1245,6 +1333,7 @@ export function TheaterView({
             }
           >
             <div
+              ref={playerBoxRef}
               data-vt="player"
               style={
                 isPip
@@ -1265,7 +1354,20 @@ export function TheaterView({
               }
             >
               {item.platform === "twitch" && item.type !== "clip" && !twitchNeedsVideoId && (
-                <div ref={twitchContainerRef} className="h-full w-full" />
+                <div
+                  ref={twitchContainerRef}
+                  style={
+                    isPip
+                      ? {
+                          width: 640,
+                          height: 360,
+                          transform: `scale(${twitchPipScale})`,
+                          transformOrigin: "top left",
+                        }
+                      : undefined
+                  }
+                  className={isPip ? undefined : "h-full w-full"}
+                />
               )}
 
               {item.platform === "twitch" && item.type === "clip" && (
