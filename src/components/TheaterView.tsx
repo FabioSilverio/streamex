@@ -39,6 +39,7 @@ import {
   formatUptime,
   formatViewerCount,
   getExternalPlatformUrl,
+  isBrokenThumbnailUrl,
   PLATFORM_IN,
   streamKeepUrl,
 } from "@/lib/utils";
@@ -1945,7 +1946,7 @@ export function TheaterView({
                       className="press-card group w-full flex items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-white/[0.05]"
                     >
                       <div className="relative h-[54px] w-24 shrink-0 overflow-hidden rounded-lg bg-white/[0.05]">
-                        {rel.thumbnailUrl && !/\/_404\/|404_processing/i.test(rel.thumbnailUrl) ? (
+                        {!isBrokenThumbnailUrl(rel.thumbnailUrl, rel.type === "live") ? (
                           <img
                             src={rel.thumbnailUrl}
                             alt=""

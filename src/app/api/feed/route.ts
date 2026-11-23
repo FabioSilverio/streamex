@@ -3,12 +3,14 @@ import { fetchUnifiedFeed, resolveCredentials } from "@/lib/stream-apis";
 import type { FollowedChannel } from "@/types/streamex";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 30;
 
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as {
       channels?: FollowedChannel[];
       perChannelLimit?: number;
+      bypassCache?: boolean;
     };
     const channels = Array.isArray(body.channels) ? body.channels.slice(0, 500) : [];
     const perChannelLimit =
@@ -17,7 +19,12 @@ export async function POST(req: Request) {
         : undefined;
     const creds = resolveCredentials(req.headers);
 
-    const { items, apiHealth } = await fetchUnifiedFeed(channels, creds, perChannelLimit);
+    const { items, apiHealth } = await fetchUnifiedFeed(
+      channels,
+      creds,
+      perChannelLimit,
+      Boolean(body.bypassCache),
+    );
 
     return NextResponse.json(
       {

@@ -34,6 +34,7 @@ import {
   DEFAULT_CHANNELS,
   EASE_OUT,
   getExternalPlatformUrl,
+  isBrokenThumbnailUrl,
 } from "@/lib/utils";
 import {
   buildCredentialHeaders,
@@ -89,6 +90,12 @@ interface ToastAlert {
 const POLL_MS = 2000;
 /** While the tab is hidden the radar keeps running (for notifications), just slower. */
 const HIDDEN_POLL_MS = 30_000;
+/**
+ * A locally synthesized "live just ended" placeholder only bridges the brief gap before the
+ * platform's real VOD appears. Channels with VODs disabled never publish one, so expire quickly
+ * instead of leaving unplayable placeholders pinned for 24h.
+ */
+const ENDED_VOD_MAX_AGE_MS = 20 * 60 * 1000;
 const NOTIFY_KEY = "streamex:notify:v1";
 const BASE_TITLE = "Streamex — Twitch e Kick num lugar só";
 /** Push local changes this long after the last edit (progress saves every 5s while watching). */
@@ -127,6 +134,20 @@ const AUTH_ERRORS: Record<string, string> = {
   token: "A plataforma recusou o código. Confira a URL de redirecionamento do app.",
   profile: "Não deu para ler o perfil da conta.",
 };
+
+function hasMatchingPublishedVod(ended: FeedItem, items: FeedItem[]): boolean {
+  const endedAt = new Date(ended.createdAt).getTime();
+  const slug = ended.channelSlug.toLowerCase();
+  return items.some(
+    (v) =>
+      v.type === "vod" &&
+      !v.id.startsWith("ended-vod:") &&
+      v.platform === ended.platform &&
+      v.channelSlug.toLowerCase() === slug &&
+      endedAt - new Date(v.createdAt).getTime() < 36 * 3600 * 1000 &&
+      endedAt - new Date(v.createdAt).getTime() > -3600 * 1000,
+  );
+}
 
 function readLastSync(): number | null {
   try {
@@ -511,17 +532,25 @@ export function StreamexApp() {
     const pruned = pruneProgressMap(loadProgressMap());
     saveProgressMap(pruned);
     setProgressMap(pruned);
-    // Placeholders older than a day are stale; keep one per channel (older builds could duplicate them).
+    // Prune stale placeholders (older than 20m) and strip dead Twitch live-preview URLs.
     const seenEnded = new Set<string>();
-    setEndedVods(
-      loadEndedVods().filter((v) => {
-        const key = `${v.platform}:${v.channelSlug}`;
-        if (Date.now() - new Date(v.createdAt).getTime() > 24 * 3600 * 1000 || seenEnded.has(key))
+    const freshEnded = loadEndedVods()
+      .filter((v) => {
+        const key = `${v.platform}:${v.channelSlug.toLowerCase()}`;
+        if (
+          Date.now() - new Date(v.createdAt).getTime() > ENDED_VOD_MAX_AGE_MS ||
+          seenEnded.has(key)
+        )
           return false;
         seenEnded.add(key);
         return true;
-      }),
-    );
+      })
+      .map((v) => ({
+        ...v,
+        thumbnailUrl: isBrokenThumbnailUrl(v.thumbnailUrl, false) ? "" : v.thumbnailUrl,
+      }));
+    saveEndedVods(freshEnded);
+    setEndedVods(freshEnded);
     setBookmarkedIds(loadBookmarkedIds());
     setLastSyncAt(readLastSync());
     setShortcutLabel(/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl K");
@@ -625,30 +654,53 @@ export function StreamexApp() {
 
   // ---------- Feed (live + VODs + clips) ----------
   const feedSeqRef = useRef(0);
-  const refreshFeed = useCallback(async (chs: FollowedChannel[], creds: ApiCredentials) => {
-    // A slow response for an older channel list must not overwrite a newer one.
-    const seq = ++feedSeqRef.current;
-    try {
-      const res = await fetch("/api/feed", {
-        method: "POST",
-        headers: buildCredentialHeaders(creds),
-        body: JSON.stringify({ channels: chs }),
-        cache: "no-store",
-      });
-      if (!res.ok) return;
-      const data = (await res.json()) as FeedResponse;
-      if (seq !== feedSeqRef.current) return;
-      const items = data.items ?? [];
-      feedItemsRef.current = items;
-      setFeedItems(items);
-      promoteLiveToVod(items, statusesRef.current);
-      if (data.apiHealth) setApiHealth(data.apiHealth);
-    } catch {
-      // keep previous feed
-    } finally {
-      if (seq === feedSeqRef.current) setLoadingFeed(false);
-    }
-  }, [promoteLiveToVod]);
+  const lastFeedAtRef = useRef(0);
+  const refreshFeed = useCallback(
+    async (
+      chs: FollowedChannel[],
+      creds: ApiCredentials,
+      opts?: { bypassCache?: boolean },
+    ) => {
+      // A slow response for an older channel list must not overwrite a newer one.
+      const seq = ++feedSeqRef.current;
+      try {
+        const res = await fetch("/api/feed", {
+          method: "POST",
+          headers: buildCredentialHeaders(creds),
+          body: JSON.stringify({
+            channels: chs,
+            ...(opts?.bypassCache ? { bypassCache: true } : {}),
+          }),
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as FeedResponse;
+        if (seq !== feedSeqRef.current) return;
+        const items = data.items ?? [];
+        lastFeedAtRef.current = Date.now();
+        feedItemsRef.current = items;
+        setFeedItems(items);
+        setEndedVods((cur) => {
+          if (cur.length === 0) return cur;
+          const now = Date.now();
+          const remaining = cur.filter(
+            (e) =>
+              now - new Date(e.createdAt).getTime() <= ENDED_VOD_MAX_AGE_MS &&
+              !hasMatchingPublishedVod(e, items),
+          );
+          if (remaining.length !== cur.length) saveEndedVods(remaining);
+          return remaining.length === cur.length ? cur : remaining;
+        });
+        promoteLiveToVod(items, statusesRef.current);
+        if (data.apiHealth) setApiHealth(data.apiHealth);
+      } catch {
+        // keep previous feed
+      } finally {
+        if (seq === feedSeqRef.current) setLoadingFeed(false);
+      }
+    },
+    [promoteLiveToVod],
+  );
 
   useEffect(() => {
     if (!hydrated) return;
@@ -658,7 +710,16 @@ export function StreamexApp() {
     const periodicFeed = window.setInterval(() => {
       if (!document.hidden) refreshFeed(channelsRef.current, credentials);
     }, 45_000);
-    return () => window.clearInterval(periodicFeed);
+    const onVisible = () => {
+      if (!document.hidden && Date.now() - lastFeedAtRef.current > 30_000) {
+        refreshFeed(channelsRef.current, credentials);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(periodicFeed);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [hydrated, channelKey, credentials, refreshFeed]);
 
   // Warm the player while the phone is idle, so tapping a video starts fast:
@@ -683,6 +744,7 @@ export function StreamexApp() {
 
     let cancelled = false;
     let timerId: number | null = null;
+    let endedRetryId: number | null = null;
     let inFlight = false;
     let activeController: AbortController | null = null;
 
@@ -791,7 +853,11 @@ export function StreamexApp() {
                 type: "vod",
                 title: prev.title || `VOD recém-encerrado de ${prev.displayName}`,
                 category: prev.category || "VOD recém-encerrado",
-                thumbnailUrl: prev.thumbnailUrl,
+                // Twitch live_user_* URLs redirect to a 404 grey camera image once offline;
+                // leave empty so CardThumbnail renders our clean poster until the real VOD arrives.
+                thumbnailUrl: isBrokenThumbnailUrl(prev.thumbnailUrl, false)
+                  ? ""
+                  : prev.thumbnailUrl,
                 durationSeconds: endedDuration,
                 viewCount: prev.viewerCount,
                 createdAt: new Date().toISOString(),
@@ -807,7 +873,11 @@ export function StreamexApp() {
                 const next = [
                   freshVod,
                   ...cur.filter(
-                    (v) => !(v.platform === prev.platform && v.channelSlug === prev.slug),
+                    (v) =>
+                      !(
+                        v.platform === prev.platform &&
+                        v.channelSlug.toLowerCase() === prev.slug.toLowerCase()
+                      ),
                   ),
                 ].slice(0, 20);
                 saveEndedVods(next);
@@ -826,7 +896,28 @@ export function StreamexApp() {
 
           prevLiveMapRef.current = nextMap;
           firstPollDoneRef.current = true;
-          if (anyEnded) refreshFeed(channelsRef.current, credentials);
+          // Drop any expired ended-live placeholders (>20m) or ones for channels now back live.
+          setEndedVods((cur) => {
+            if (cur.length === 0) return cur;
+            const nowTs = Date.now();
+            const remaining = cur.filter((e) => {
+              const st = nextMap.get(`${e.platform}:${e.channelSlug.toLowerCase()}`);
+              if (st?.isLive) return false;
+              return nowTs - new Date(e.createdAt).getTime() <= ENDED_VOD_MAX_AGE_MS;
+            });
+            if (remaining.length !== cur.length) saveEndedVods(remaining);
+            return remaining.length === cur.length ? cur : remaining;
+          });
+          if (anyEnded) {
+            refreshFeed(channelsRef.current, credentials, { bypassCache: true });
+            // Platforms often take a few seconds after stream end to publish the final archive VOD.
+            if (endedRetryId) window.clearTimeout(endedRetryId);
+            endedRetryId = window.setTimeout(() => {
+              if (!cancelled) {
+                refreshFeed(channelsRef.current, credentials, { bypassCache: true });
+              }
+            }, 15_000);
+          }
         }
       } catch {
         // transient network abort
@@ -843,32 +934,32 @@ export function StreamexApp() {
       cancelled = true;
       document.removeEventListener("visibilitychange", onVisibility);
       if (timerId) window.clearTimeout(timerId);
+      if (endedRetryId) window.clearTimeout(endedRetryId);
       activeController?.abort();
     };
   }, [hydrated, channelKey, credentials, pushToast, refreshFeed, promoteLiveToVod]);
 
-  // Merge live statuses (2s fresh) + feed VODs/clips + locally detected ended VODs
+  // Merge live statuses (2s fresh) + feed VODs/clips + briefly pending ended-live placeholders
   const mergedFeedItems = useMemo(() => {
     const liveFromRadar = statuses.filter((s) => s.isLive).map((s) => liveItemFromStatus(s));
+    const liveKeys = new Set(
+      liveFromRadar.map((l) => `${l.platform}:${l.channelSlug.toLowerCase()}`),
+    );
     const nonLiveFeed = feedItems.filter((i) => i.type !== "live");
-    // A locally detected "live just ended" card is a placeholder until the platform publishes the
-    // real VOD (which starts at the broadcast start, i.e. before the placeholder's timestamp).
-    const followed = new Set(channels.map((c) => `${c.platform}:${c.slug}`));
+    // A locally detected "live just ended" card is a brief placeholder until the platform publishes
+    // the real VOD (or expires after 20m if the channel has VODs disabled).
+    const followed = new Set(channels.map((c) => `${c.platform}:${c.slug.toLowerCase()}`));
     const pendingEnded = endedVods.filter((e) => {
-      if (!followed.has(`${e.platform}:${e.channelSlug}`)) return false;
-      const endedAt = new Date(e.createdAt).getTime();
-      return !nonLiveFeed.some(
-        (v) =>
-          v.type === "vod" &&
-          v.platform === e.platform &&
-          v.channelSlug === e.channelSlug &&
-          endedAt - new Date(v.createdAt).getTime() < 36 * 3600 * 1000 &&
-          endedAt - new Date(v.createdAt).getTime() > -3600 * 1000,
-      );
+      const key = `${e.platform}:${e.channelSlug.toLowerCase()}`;
+      if (!followed.has(key) || liveKeys.has(key)) return false;
+      return !hasMatchingPublishedVod(e, nonLiveFeed);
     });
+    const archiveItems = [...pendingEnded, ...nonLiveFeed].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
     const seen = new Set<string>();
     const combined: FeedItem[] = [];
-    for (const item of [...liveFromRadar, ...pendingEnded, ...nonLiveFeed]) {
+    for (const item of [...liveFromRadar, ...archiveItems]) {
       if (seen.has(item.id)) continue;
       seen.add(item.id);
       combined.push(item);

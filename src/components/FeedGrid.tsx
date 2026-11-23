@@ -30,6 +30,7 @@ import {
   formatViewerCount,
   channelUrl,
   getExternalPlatformUrl,
+  isBrokenThumbnailUrl,
   PLATFORM_IN,
   streamKeepUrl,
 } from "@/lib/utils";
@@ -93,6 +94,9 @@ export function FeedGrid({
   multiIds,
   onAddToMulti,
 }: FeedGridProps) {
+  const liveChannelKeys = new Set(
+    statuses.filter((s) => s.isLive).map((s) => `${s.platform}:${s.slug.toLowerCase()}`),
+  );
   const itemDurationByKey = new Map<string, number>();
   for (const it of items) {
     if (it.type === "vod" && it.durationSeconds > 0) {
@@ -339,6 +343,9 @@ export function FeedGrid({
                         src={prog.thumbnailUrl}
                         fallbackAvatar={`https://unavatar.io/${prog.platform}/${prog.channelSlug}`}
                         channelName={prog.channelName}
+                        allowLivePreview={liveChannelKeys.has(
+                          `${prog.platform}:${prog.channelSlug.toLowerCase()}`,
+                        )}
                         zoomOnHover
                       />
                       <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
@@ -482,6 +489,10 @@ export function FeedGrid({
                       : undefined
                   }
                   onSelect={() => onSelectItem(item)}
+                  isChannelLive={
+                    item.type === "live" ||
+                    liveChannelKeys.has(`${item.platform}:${item.channelSlug.toLowerCase()}`)
+                  }
                   inMulti={multiIds.includes(item.id)}
                   onAddToMulti={onAddToMulti}
                   onToggleWatched={onToggleWatched}
@@ -595,15 +606,17 @@ function CardThumbnail({
   src,
   fallbackAvatar,
   channelName,
+  allowLivePreview = false,
   zoomOnHover = false,
 }: {
   src?: string;
   fallbackAvatar?: string;
   channelName: string;
+  allowLivePreview?: boolean;
   zoomOnHover?: boolean;
 }) {
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
-  const broken = !src || /\/_404\/|404_processing/i.test(src) || failedSrc === src;
+  const broken = !src || isBrokenThumbnailUrl(src, allowLivePreview) || failedSrc === src;
 
   if (broken) {
     return (
@@ -648,6 +661,7 @@ export function FeedCard({
   item,
   progress,
   liveCheckpoint,
+  isChannelLive,
   onSelect,
   inMulti,
   onAddToMulti,
@@ -658,6 +672,7 @@ export function FeedCard({
   item: FeedItem;
   progress?: WatchProgress;
   liveCheckpoint?: WatchProgress;
+  isChannelLive?: boolean;
   onSelect: () => void;
   inMulti?: boolean;
   onAddToMulti?: (item: FeedItem) => void;
@@ -713,6 +728,7 @@ export function FeedCard({
             src={item.thumbnailUrl}
             fallbackAvatar={item.channelAvatar}
             channelName={item.channelName}
+            allowLivePreview={item.type === "live" || Boolean(isChannelLive)}
             zoomOnHover
           />
 

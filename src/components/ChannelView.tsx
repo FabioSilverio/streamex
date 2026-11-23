@@ -274,6 +274,7 @@ export function ChannelView({
                   : undefined
               }
               onSelect={() => onSelectItem(item)}
+              isChannelLive={channel.isLive}
               inMulti={multiIds.includes(item.id)}
               onAddToMulti={onAddToMulti}
               onToggleWatched={onToggleWatched}

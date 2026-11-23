@@ -160,6 +160,18 @@ export function makeAvatarFallback(slug: string, platform: Platform): string {
   return `data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 80 80'><rect width='80' height='80' rx='40' fill='${bg}'/><text x='50%' y='54%' dominant-baseline='middle' text-anchor='middle' fill='${fg}' font-family='system-ui,sans-serif' font-weight='800' font-size='34'>${initial}</text></svg>`;
 }
 
+/**
+ * Twitch returns a 403 `404_processing` URL for freshly created VODs, and redirects offline
+ * `previews-ttv/live_user_*` URLs (HTTP 302 → 200) to `404_preview-640x360.jpg` (grey camera).
+ * Treat those as broken so cards show our clean poster instead of a broken image or grey camera.
+ */
+export function isBrokenThumbnailUrl(src?: string, allowLivePreview = false): boolean {
+  if (!src) return true;
+  if (/\/_404\/|404_processing|404_preview/i.test(src)) return true;
+  if (!allowLivePreview && /previews-ttv\/live_user_/i.test(src)) return true;
+  return false;
+}
+
 export const DEFAULT_CHANNELS: FollowedChannel[] = [
   { id: "twitch:gaules", platform: "twitch", slug: "gaules", displayName: "Gaules", addedAt: 1 },
   {

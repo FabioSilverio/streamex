@@ -74,7 +74,7 @@ async function getTwitchAppToken(clientId: string, clientSecret: string): Promis
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
       cache: "no-store",
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(6000),
     });
 
     if (!res.ok) return null;
@@ -147,39 +147,43 @@ async function getTwitchUsersOfficial(
   }
 
   for (const group of chunk(missing, 100)) {
-    try {
-      const qs = group.map((l) => `login=${encodeURIComponent(l)}`).join("&");
-      const res = await fetch(`https://api.twitch.tv/helix/users?${qs}`, {
-        headers: {
-          "Client-Id": clientId,
-          Authorization: `Bearer ${token}`,
-        },
-        cache: "no-store",
-        signal: AbortSignal.timeout(3500),
-      });
-      if (res.ok) {
-        const json = (await res.json()) as {
-          data?: Array<{
-            id: string;
-            login: string;
-            display_name: string;
-            profile_image_url: string;
-          }>;
-        };
-        for (const u of json.data ?? []) {
-          const meta: TwitchUserMeta = {
-            id: u.id,
-            login: u.login.toLowerCase(),
-            displayName: u.display_name,
-            avatarUrl: u.profile_image_url,
-            cachedAt: now,
+    const qs = group.map((l) => `login=${encodeURIComponent(l)}`).join("&");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(`https://api.twitch.tv/helix/users?${qs}`, {
+          headers: {
+            "Client-Id": clientId,
+            Authorization: `Bearer ${token}`,
+          },
+          cache: "no-store",
+          signal: AbortSignal.timeout(6000),
+        });
+        if (res.ok) {
+          const json = (await res.json()) as {
+            data?: Array<{
+              id: string;
+              login: string;
+              display_name: string;
+              profile_image_url: string;
+            }>;
           };
-          twitchUserCache.set(meta.login, meta);
-          result.set(meta.login, meta);
+          for (const u of json.data ?? []) {
+            const meta: TwitchUserMeta = {
+              id: u.id,
+              login: u.login.toLowerCase(),
+              displayName: u.display_name,
+              avatarUrl: u.profile_image_url,
+              cachedAt: now,
+            };
+            twitchUserCache.set(meta.login, meta);
+            result.set(meta.login, meta);
+          }
+          break;
         }
+        if (res.status < 500 && res.status !== 429) break;
+      } catch {
+        // Retry once on transient timeout/network hiccup
       }
-    } catch {
-      // Ignore profile fetch error; streams endpoint still resolves live state
     }
   }
 
@@ -231,7 +235,7 @@ async function fetchTwitchLiveStatuses(
                 {
                   headers: { "Client-Id": clientId, Authorization: `Bearer ${token}` },
                   cache: "no-store",
-                  signal: AbortSignal.timeout(3000),
+                  signal: AbortSignal.timeout(5000),
                 },
               ),
             ),
@@ -656,24 +660,30 @@ const channelItemsCache = new Map<string, { items: FeedItem[]; expiresAt: number
 
 /**
  * VODs and clips change slowly; cache them per channel so a 45s feed refresh over dozens of
- * followed channels doesn't hammer Twitch/Kick. Empty results (often a failed request) expire sooner.
+ * followed channels doesn't hammer Twitch/Kick. Only cache when at least one upstream fetch
+ * succeeded, so transient timeouts never poison the cache.
  */
 async function cachedChannelItems(
   key: string,
   sink: FeedItem[],
-  load: (out: FeedItem[]) => Promise<void>,
+  load: (out: FeedItem[]) => Promise<boolean>,
+  bypassCache = false,
 ) {
-  const hit = channelItemsCache.get(key);
-  if (hit && hit.expiresAt > Date.now()) {
-    sink.push(...hit.items);
-    return;
+  if (!bypassCache) {
+    const hit = channelItemsCache.get(key);
+    if (hit && hit.expiresAt > Date.now()) {
+      sink.push(...hit.items);
+      return;
+    }
   }
   const out: FeedItem[] = [];
-  await load(out);
-  channelItemsCache.set(key, {
-    items: out,
-    expiresAt: Date.now() + (out.length > 0 ? 180_000 : 60_000),
-  });
+  const ok = await load(out);
+  if (ok) {
+    channelItemsCache.set(key, {
+      items: out,
+      expiresAt: Date.now() + (out.length > 0 ? 180_000 : 60_000),
+    });
+  }
   sink.push(...out);
 }
 
@@ -681,6 +691,7 @@ export async function fetchUnifiedFeed(
   channels: FollowedChannel[],
   creds: ResolvedCredentials,
   perChannelLimit = 4,
+  bypassCache = false,
 ): Promise<{ items: FeedItem[]; apiHealth: ApiHealth }> {
   const vodLimit = Math.min(20, Math.max(1, perChannelLimit));
   const clipLimit = Math.min(12, Math.max(1, perChannelLimit));
@@ -721,23 +732,30 @@ export async function fetchUnifiedFeed(
     });
   }
 
-  // 2. Fetch Twitch VODs & Clips via Official Helix API when credentials are present
+  // 2-4. Fetch Twitch, Kick, and YouTube VODs/clips in parallel so large multi-platform lists stay fast.
   const twitchChannels = channels.filter((c) => c.platform === "twitch");
-  if (twitchChannels.length > 0 && creds.twitchClientId && creds.twitchClientSecret) {
+  const kickChannels = channels.filter((c) => c.platform === "kick");
+  const youtubeChannels = channels.filter((c) => c.platform === "youtube");
+
+  const fetchTwitchArchive = async () => {
+    if (twitchChannels.length === 0 || !creds.twitchClientId || !creds.twitchClientSecret) return;
     const token = await getTwitchAppToken(creds.twitchClientId, creds.twitchClientSecret);
-    if (token) {
-      const userMap = await getTwitchUsersOfficial(
-        twitchChannels.map((c) => c.slug),
-        creds.twitchClientId,
-        token,
-      );
+    if (!token) return;
+    const userMap = await getTwitchUsersOfficial(
+      twitchChannels.map((c) => c.slug),
+      creds.twitchClientId,
+      token,
+    );
 
-      const startedAt7Days = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    const startedAt14Days = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
 
-      await mapLimit(twitchChannels.slice(0, 250), 8, (ch) =>
-        cachedChannelItems(`twitch:${ch.slug.toLowerCase()}:${vodLimit}`, items, async (items) => {
+    await mapLimit(twitchChannels.slice(0, 250), 12, (ch) =>
+      cachedChannelItems(
+        `twitch:${ch.slug.toLowerCase()}:${vodLimit}`,
+        items,
+        async (out) => {
           const meta = userMap.get(ch.slug.toLowerCase());
-          if (!meta) return;
+          if (!meta) return false;
 
           const [vodsRes, clipsRes] = await Promise.all([
             fetch(
@@ -748,18 +766,18 @@ export async function fetchUnifiedFeed(
                   Authorization: `Bearer ${token}`,
                 },
                 cache: "no-store",
-                signal: AbortSignal.timeout(4000),
+                signal: AbortSignal.timeout(6000),
               },
             ).catch(() => null),
             fetch(
-              `https://api.twitch.tv/helix/clips?broadcaster_id=${encodeURIComponent(meta.id)}&first=${clipLimit}&started_at=${encodeURIComponent(startedAt7Days)}`,
+              `https://api.twitch.tv/helix/clips?broadcaster_id=${encodeURIComponent(meta.id)}&first=${clipLimit}&started_at=${encodeURIComponent(startedAt14Days)}`,
               {
                 headers: {
                   "Client-Id": creds.twitchClientId!,
                   Authorization: `Bearer ${token}`,
                 },
                 cache: "no-store",
-                signal: AbortSignal.timeout(4000),
+                signal: AbortSignal.timeout(6000),
               },
             ).catch(() => null),
           ]);
@@ -781,13 +799,13 @@ export async function fetchUnifiedFeed(
             );
             for (const v of vodsJson.data ?? []) {
               const isProcessingThumb =
-                !v.thumbnail_url || /\/_404\/|404_processing/i.test(v.thumbnail_url);
+                !v.thumbnail_url || /\/_404\/|404_processing|404_preview/i.test(v.thumbnail_url);
               // Twitch returns a 403 `404_processing` URL for in-progress / freshly ended VODs.
               // Fall back to the live stream preview while live, or empty (clean poster) otherwise.
               const thumb = isProcessingThumb
                 ? liveMatch?.thumbnailUrl || ""
                 : v.thumbnail_url.replace("%{width}", "640").replace("%{height}", "360");
-              items.push({
+              out.push({
                 id: `twitch:vod:${v.id}`,
                 platform: "twitch",
                 channelSlug: meta.login,
@@ -823,7 +841,7 @@ export async function fetchUnifiedFeed(
               }>;
             };
             for (const c of clipsJson.data ?? []) {
-              items.push({
+              out.push({
                 id: `twitch:clip:${c.id}`,
                 platform: "twitch",
                 channelSlug: meta.login,
@@ -844,128 +862,140 @@ export async function fetchUnifiedFeed(
               });
             }
           }
-        }),
-      );
-    }
-  }
 
-  // 3. Fetch Kick VODs & Clips when public v2 is accessible
-  const kickChannels = channels.filter((c) => c.platform === "kick");
-  if (kickChannels.length > 0 && apiHealth.kick !== "needs_key") {
+          return Boolean(vodsRes?.ok || clipsRes?.ok);
+        },
+        bypassCache,
+      ),
+    );
+  };
+
+  const fetchKickArchive = async () => {
+    if (kickChannels.length === 0 || apiHealth.kick === "needs_key") return;
     await mapLimit(kickChannels.slice(0, 150), 6, (ch) =>
-      cachedChannelItems(`kick:${ch.slug.toLowerCase()}:${vodLimit}`, items, async (items) => {
-        const lower = ch.slug.toLowerCase();
-        try {
-          const [vodsRes, clipsRes] = await Promise.all([
-            fetch(`https://kick.com/api/v2/channels/${encodeURIComponent(lower)}/videos`, {
-              headers: { Accept: "application/json" },
-              cache: "no-store",
-              signal: AbortSignal.timeout(2500),
-            }).catch(() => null),
-            fetch(
-              `https://kick.com/api/v2/channels/${encodeURIComponent(lower)}/clips?cursor=0&sort=view&time=week`,
-              {
+      cachedChannelItems(
+        `kick:${ch.slug.toLowerCase()}:${vodLimit}`,
+        items,
+        async (out) => {
+          const lower = ch.slug.toLowerCase();
+          try {
+            const [vodsRes, clipsRes] = await Promise.all([
+              fetch(`https://kick.com/api/v2/channels/${encodeURIComponent(lower)}/videos`, {
                 headers: { Accept: "application/json" },
                 cache: "no-store",
-                signal: AbortSignal.timeout(2500),
-              },
-            ).catch(() => null),
-          ]);
+                signal: AbortSignal.timeout(3000),
+              }).catch(() => null),
+              fetch(
+                `https://kick.com/api/v2/channels/${encodeURIComponent(lower)}/clips?cursor=0&sort=view&time=week`,
+                {
+                  headers: { Accept: "application/json" },
+                  cache: "no-store",
+                  signal: AbortSignal.timeout(3000),
+                },
+              ).catch(() => null),
+            ]);
 
-          const statusMatch = statuses.find((s) => s.platform === "kick" && s.slug === lower);
-          const avatar =
-            statusMatch?.avatarUrl || ch.avatarUrl || makeAvatarFallback(lower, "kick");
+            const statusMatch = statuses.find((s) => s.platform === "kick" && s.slug === lower);
+            const avatar =
+              statusMatch?.avatarUrl || ch.avatarUrl || makeAvatarFallback(lower, "kick");
 
-          if (vodsRes && vodsRes.ok) {
-            const vodsData = (await vodsRes.json()) as Array<{
-              id?: number;
-              is_live?: boolean;
-              session_title?: string;
-              duration?: number;
-              views?: number;
-              created_at?: string;
-              thumbnail?: { src?: string };
-              source?: string;
-              video?: { uuid?: string };
-              categories?: Array<{ name?: string }>;
-            }>;
-            for (const v of (Array.isArray(vodsData) ? vodsData : [])
-              // the in-progress broadcast is listed as a VOD with duration 0 — it's the live, skip it
-              .filter((v) => !v.is_live && (v.duration ?? 0) > 0)
-              .slice(0, vodLimit)) {
-              const uuid = v.video?.uuid || String(v.id || "");
-              if (!uuid) continue;
-              items.push({
-                id: `kick:vod:${uuid}`,
-                platform: "kick",
-                channelSlug: lower,
-                channelName: statusMatch?.displayName || ch.displayName,
-                channelAvatar: avatar,
-                type: "vod",
-                title: v.session_title || `VOD de ${ch.displayName}`,
-                category: v.categories?.[0]?.name || "Kick VOD",
-                thumbnailUrl: v.thumbnail?.src || "",
-                durationSeconds: Math.round((v.duration ?? 0) / 1000),
-                viewCount: v.views ?? 0,
-                createdAt: kickDate(v.created_at),
-                url: `https://kick.com/${lower}/videos/${uuid}`,
-                videoId: uuid,
-                hlsUrl: v.source || undefined,
-                tags: ["VOD", "Kick", v.categories?.[0]?.name || "Replay"],
-              });
-            }
-          }
-
-          if (clipsRes && clipsRes.ok) {
-            const clipsJson = (await clipsRes.json()) as {
-              clips?: Array<{
-                id?: string;
-                title?: string;
+            if (vodsRes && vodsRes.ok) {
+              const vodsData = (await vodsRes.json()) as Array<{
+                id?: number;
+                is_live?: boolean;
+                session_title?: string;
                 duration?: number;
                 views?: number;
                 created_at?: string;
-                thumbnail_url?: string;
-                clip_url?: string;
-                category?: { name?: string };
+                thumbnail?: { src?: string };
+                source?: string;
+                video?: { uuid?: string };
+                categories?: Array<{ name?: string }>;
               }>;
-            };
-            for (const c of (clipsJson.clips ?? []).slice(0, clipLimit)) {
-              if (!c.id) continue;
-              items.push({
-                id: `kick:clip:${c.id}`,
-                platform: "kick",
-                channelSlug: lower,
-                channelName: statusMatch?.displayName || ch.displayName,
-                channelAvatar: avatar,
-                type: "clip",
-                title: c.title || `Clipe de ${ch.displayName}`,
-                category: c.category?.name || "Kick Clipe",
-                thumbnailUrl: c.thumbnail_url || "",
-                durationSeconds: Math.round(c.duration ?? 30),
-                viewCount: c.views ?? 0,
-                createdAt: kickDate(c.created_at),
-                url: `https://kick.com/${lower}/clips/${c.id}`,
-                clipId: c.id,
-                hlsUrl: c.clip_url || undefined,
-                tags: ["Clipe", "Kick"],
-              });
+              for (const v of (Array.isArray(vodsData) ? vodsData : [])
+                // the in-progress broadcast is listed as a VOD with duration 0 — it's the live, skip it
+                .filter((v) => !v.is_live && (v.duration ?? 0) > 0)
+                .slice(0, vodLimit)) {
+                const uuid = v.video?.uuid || String(v.id || "");
+                if (!uuid) continue;
+                out.push({
+                  id: `kick:vod:${uuid}`,
+                  platform: "kick",
+                  channelSlug: lower,
+                  channelName: statusMatch?.displayName || ch.displayName,
+                  channelAvatar: avatar,
+                  type: "vod",
+                  title: v.session_title || `VOD de ${ch.displayName}`,
+                  category: v.categories?.[0]?.name || "Kick VOD",
+                  thumbnailUrl: v.thumbnail?.src || "",
+                  durationSeconds: Math.round((v.duration ?? 0) / 1000),
+                  viewCount: v.views ?? 0,
+                  createdAt: kickDate(v.created_at),
+                  url: `https://kick.com/${lower}/videos/${uuid}`,
+                  videoId: uuid,
+                  hlsUrl: v.source || undefined,
+                  tags: ["VOD", "Kick", v.categories?.[0]?.name || "Replay"],
+                });
+              }
             }
-          }
-        } catch {
-          // Ignore individual channel errors
-        }
-      }),
-    );
-  }
 
-  // 4. YouTube uploads (RSS, cached 10 min per channel)
-  const youtubeChannels = channels.filter((c) => c.platform === "youtube");
-  await mapLimit(youtubeChannels.slice(0, 100), 6, async (ch) => {
-    const status = statuses.find((st) => st.platform === "youtube" && st.slug === ch.slug);
-    const uploads = await fetchYoutubeVideos(ch, status?.avatarUrl || ch.avatarUrl || "", ytLimit);
-    // the current live also shows up as an upload — it's already in the feed as a live card
-    items.push(...uploads.filter((u) => u.videoId !== status?.streamId));
-  });
+            if (clipsRes && clipsRes.ok) {
+              const clipsJson = (await clipsRes.json()) as {
+                clips?: Array<{
+                  id?: string;
+                  title?: string;
+                  duration?: number;
+                  views?: number;
+                  created_at?: string;
+                  thumbnail_url?: string;
+                  clip_url?: string;
+                  category?: { name?: string };
+                }>;
+              };
+              for (const c of (clipsJson.clips ?? []).slice(0, clipLimit)) {
+                if (!c.id) continue;
+                out.push({
+                  id: `kick:clip:${c.id}`,
+                  platform: "kick",
+                  channelSlug: lower,
+                  channelName: statusMatch?.displayName || ch.displayName,
+                  channelAvatar: avatar,
+                  type: "clip",
+                  title: c.title || `Clipe de ${ch.displayName}`,
+                  category: c.category?.name || "Kick Clipe",
+                  thumbnailUrl: c.thumbnail_url || "",
+                  durationSeconds: Math.round(c.duration ?? 30),
+                  viewCount: c.views ?? 0,
+                  createdAt: kickDate(c.created_at),
+                  url: `https://kick.com/${lower}/clips/${c.id}`,
+                  clipId: c.id,
+                  hlsUrl: c.clip_url || undefined,
+                  tags: ["Clipe", "Kick"],
+                });
+              }
+            }
+
+            return Boolean(vodsRes?.ok || clipsRes?.ok);
+          } catch {
+            // Ignore individual channel errors
+            return false;
+          }
+        },
+        bypassCache,
+      ),
+    );
+  };
+
+  const fetchYoutubeArchive = async () => {
+    await mapLimit(youtubeChannels.slice(0, 100), 6, async (ch) => {
+      const status = statuses.find((st) => st.platform === "youtube" && st.slug === ch.slug);
+      const uploads = await fetchYoutubeVideos(ch, status?.avatarUrl || ch.avatarUrl || "", ytLimit);
+      // the current live also shows up as an upload — it's already in the feed as a live card
+      items.push(...uploads.filter((u) => u.videoId !== status?.streamId));
+    });
+  };
+
+  await Promise.all([fetchTwitchArchive(), fetchKickArchive(), fetchYoutubeArchive()]);
 
   // Sort: live first, then newest VODs/clips
   items.sort((a, b) => {
