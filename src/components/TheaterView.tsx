@@ -148,7 +148,7 @@ export function TheaterView({
   const [pipLarge, setPipLarge] = useState(false);
   const [draggingPip, setDraggingPip] = useState(false);
   const pipCardRef = useRef<HTMLDivElement | null>(null);
-  const isMarkedWatched = isVod && isWatchedVod(progress);
+  const isMarkedWatched = isVod && isWatchedVod(progress, item.durationSeconds);
   const prevMarkedWatchedRef = useRef(isMarkedWatched);
   const markedWatchedInSessionRef = useRef(false);
   useEffect(() => {
@@ -271,7 +271,8 @@ export function TheaterView({
   const [resumeTarget] = useState(() => {
     if (item.type !== "vod" || !progress || progress.watched || progress.currentTime < MIN_RESUME_SECONDS)
       return 0;
-    if (progress.duration > 0 && progress.currentTime / progress.duration >= FINISHED_AT) return 0;
+    const dur = Math.max(progress.duration || 0, item.durationSeconds || 0);
+    if (dur > 0 && progress.currentTime / dur >= FINISHED_AT) return 0;
     return Math.floor(progress.currentTime);
   });
   const latestProgressRef = useRef(progress);
@@ -478,7 +479,7 @@ export function TheaterView({
     let lastPersistAt = 0;
 
     const savedPrefs = loadPlayerPrefs(prefsVodKey);
-    let prefsApplied = false;
+    let prefsAppliedAt = 0;
     let appliedOnPlay = false;
     let lastSavedVol = savedPrefs.volume;
     let lastSavedMuted = savedPrefs.muted;
@@ -489,7 +490,14 @@ export function TheaterView({
       try {
         const t = p.getCurrentTime?.() ?? 0;
         const d = p.getDuration?.() ?? 0;
-        return { t: Number.isFinite(t) ? t : 0, d: Number.isFinite(d) ? d : 0 };
+        const cleanT = Number.isFinite(t) ? t : 0;
+        const cleanD = Number.isFinite(d) ? d : 0;
+        // During preroll ads (e.g. 15–30s), Twitch reports the ad's duration instead of the VOD's.
+        // Ignore ad ticks completely so a 30s ad finishing never marks a multi-hour VOD as watched!
+        const isLikelyAd =
+          isVod && item.durationSeconds > 120 && cleanD > 0 && cleanD < item.durationSeconds * 0.5;
+        if (isLikelyAd) return null;
+        return { t: cleanT, d: Math.max(cleanD, item.durationSeconds || 0) };
       } catch {
         return null;
       }
@@ -497,13 +505,16 @@ export function TheaterView({
 
     const capturePrefs = () => {
       const p = twitchPlayerRef.current;
-      if (!p || !prefsApplied) return;
+      // Twitch's SDK initializes `_playerState.volume = 0` until the iframe posts back UPDATE_STATE.
+      // Wait for PLAYING + a short settle window so we never overwrite saved volume with 0.
+      if (!p || !appliedOnPlay || !prefsAppliedAt || Date.now() - prefsAppliedAt < 2500) return;
       try {
         const vol = p.getVolume?.();
         const muted = p.getMuted?.();
         if (typeof vol === "number" && Number.isFinite(vol)) {
           const rounded = Math.round(vol * 100) / 100;
           const nextMuted = typeof muted === "boolean" ? muted : lastSavedMuted;
+          if (rounded === 0 && !nextMuted && lastSavedVol > 0) return;
           if (Math.abs(rounded - lastSavedVol) >= 0.01 || nextMuted !== lastSavedMuted) {
             lastSavedVol = rounded;
             lastSavedMuted = nextMuted;
@@ -515,11 +526,15 @@ export function TheaterView({
       }
     };
 
-    const flush = () => {
+    const flush = (fromEnded = false) => {
       capturePrefs();
       const r = read();
-      if (r && r.t > MIN_RESUME_SECONDS && canSave(r.t))
-        persistRef.current(r.t, r.d || item.durationSeconds, undefined, true);
+      if (!r || r.t <= MIN_RESUME_SECONDS || !canSave(r.t)) return;
+      // Ignore premature ENDED events (e.g. preroll ad end or error) unless actually near the real end.
+      if (fromEnded && r.d > 0 && r.t < r.d * 0.9) return;
+      // Also guard in-progress VODs whose duration is still growing: don't save >= 95% if user barely watched.
+      if (r.d > 0 && r.t / r.d >= FINISHED_AT && playedSecondsRef.current < 30) return;
+      persistRef.current(r.t, r.d || item.durationSeconds, undefined, true);
     };
     let lastT = 0;
 
@@ -530,12 +545,12 @@ export function TheaterView({
         const options: Record<string, unknown> = {
           width: "100%",
           height: "100%",
-          parent: Array.from(new Set([window.location.hostname || "localhost", "localhost"])),
+          parent: [window.location.hostname || "localhost"],
           autoplay: true,
           muted: savedPrefs.muted,
         };
         if (isVod && item.videoId) {
-          options.video = item.videoId.startsWith("v") ? item.videoId : `v${item.videoId}`;
+          options.video = item.videoId.replace(/^v/i, "");
           if (resumeTarget > 0) {
             const h = Math.floor(resumeTarget / 3600);
             const m = Math.floor((resumeTarget % 3600) / 60);
@@ -554,21 +569,40 @@ export function TheaterView({
           try {
             player.setVolume?.(lastSavedVol);
             player.setMuted?.(lastSavedMuted);
-            prefsApplied = true;
+            prefsAppliedAt = Date.now();
           } catch {
             // not ready yet
           }
         };
 
         player.addEventListener(window.Twitch.Player.READY, applyPrefs);
+        if (window.Twitch.Player.VIDEO_READY) {
+          player.addEventListener(window.Twitch.Player.VIDEO_READY, applyPrefs);
+        }
         player.addEventListener(window.Twitch.Player.PLAYING, () => {
           if (!appliedOnPlay) {
             appliedOnPlay = true;
             applyPrefs();
           }
         });
-        player.addEventListener(window.Twitch.Player.PAUSE, flush);
-        player.addEventListener(window.Twitch.Player.ENDED, flush);
+        // If browser autoplay policy blocks sound, mute and start instead of hanging on a black screen.
+        if (window.Twitch.Player.PLAYBACK_BLOCKED) {
+          player.addEventListener(window.Twitch.Player.PLAYBACK_BLOCKED, () => {
+            try {
+              player.setMuted?.(true);
+              player.play?.();
+            } catch {
+              // ignore
+            }
+          });
+        }
+        if (window.Twitch.Player.ERROR) {
+          player.addEventListener(window.Twitch.Player.ERROR, () => {
+            if (!destroyed) setPlayerError(true);
+          });
+        }
+        player.addEventListener(window.Twitch.Player.PAUSE, () => flush(false));
+        player.addEventListener(window.Twitch.Player.ENDED, () => flush(true));
 
         tick = window.setInterval(() => {
           capturePrefs();
@@ -584,6 +618,8 @@ export function TheaterView({
             Date.now() - lastPersistAt > SAVE_EVERY_MS &&
             !player.isPaused?.()
           ) {
+            // Don't accidentally mark as watched if the player reports near-end right after opening
+            if (r.d > 0 && r.t / r.d >= FINISHED_AT && playedSecondsRef.current < 30) return;
             lastPersistAt = Date.now();
             persistRef.current(r.t, r.d || item.durationSeconds);
           }
@@ -591,16 +627,22 @@ export function TheaterView({
       })
       .catch(() => setPlayerError(true));
 
-    const onHide = () => document.hidden && flush();
+    const onHide = () => document.hidden && flush(false);
+    const onPageHide = () => flush(false);
     document.addEventListener("visibilitychange", onHide);
-    window.addEventListener("pagehide", flush);
+    window.addEventListener("pagehide", onPageHide);
 
     return () => {
       destroyed = true;
-      flush();
+      flush(false);
       document.removeEventListener("visibilitychange", onHide);
-      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("pagehide", onPageHide);
       if (tick) window.clearInterval(tick);
+      try {
+        twitchPlayerRef.current?.destroy?.();
+      } catch {
+        // already destroyed
+      }
       twitchPlayerRef.current = null;
       container.innerHTML = "";
     };

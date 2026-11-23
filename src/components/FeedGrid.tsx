@@ -93,8 +93,14 @@ export function FeedGrid({
   multiIds,
   onAddToMulti,
 }: FeedGridProps) {
+  const itemDurationByKey = new Map<string, number>();
+  for (const it of items) {
+    if (it.type === "vod" && it.durationSeconds > 0) {
+      itemDurationByKey.set(buildProgressKey(it), it.durationSeconds);
+    }
+  }
   const progressList = Object.values(progressMap)
-    .filter(isResumable)
+    .filter((p) => isResumable(p, itemDurationByKey.get(p.key)))
     .filter((p) => platformFilter === "all" || p.platform === platformFilter)
     .sort((a, b) => b.updatedAt - a.updatedAt);
 
@@ -676,11 +682,12 @@ export function FeedCard({
     [],
   );
 
-  const watched = item.type === "vod" && isWatchedVod(progress);
+  const watched = item.type === "vod" && isWatchedVod(progress, item.durationSeconds);
+  const effectiveDuration = Math.max(progress?.duration ?? 0, item.durationSeconds || 0);
   const pct = watched
     ? 100
-    : progress && progress.duration > 0
-      ? Math.min(100, (progress.currentTime / progress.duration) * 100)
+    : progress && effectiveDuration > 0
+      ? Math.min(100, (progress.currentTime / effectiveDuration) * 100)
       : 0;
   const showResume = item.type !== "live" && !watched && progress && progress.currentTime > 5;
 

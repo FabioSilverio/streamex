@@ -9,7 +9,8 @@ export interface TwitchPlayerInstance {
   setVolume?: (volume: number) => void;
   getMuted?: () => boolean;
   setMuted?: (muted: boolean) => void;
-  addEventListener: (event: string, cb: () => void) => void;
+  destroy?: () => void;
+  addEventListener: (event: string, cb: (...args: unknown[]) => void) => void;
 }
 
 declare global {
@@ -18,10 +19,13 @@ declare global {
       Player: {
         new (element: string | HTMLElement, options: Record<string, unknown>): TwitchPlayerInstance;
         READY: string;
+        VIDEO_READY?: string;
         PLAY: string;
         PLAYING: string;
         PAUSE: string;
         ENDED: string;
+        ERROR?: string;
+        PLAYBACK_BLOCKED?: string;
       };
     };
   }

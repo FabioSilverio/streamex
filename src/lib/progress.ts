@@ -16,19 +16,23 @@ const VOD_MATCH_WINDOW_MS = 35 * 60 * 1000;
  * Only VODs appear in the "Continuar assistindo" rail. Live exit checkpoints are stored alongside
  * them (keyed per broadcast) and automatically promoted into VOD progress once the VOD appears.
  */
-export function isResumable(p: WatchProgress): boolean {
+export function isResumable(p: WatchProgress, knownDuration = 0): boolean {
   if (p.contentType !== "vod") return false;
   if (p.watched) return false;
   if (!p.currentTime || p.currentTime < MIN_RESUME_SECONDS) return false;
-  if (p.duration > 0 && p.currentTime / p.duration >= FINISHED_AT) return false;
+  const dur = Math.max(p.duration || 0, knownDuration || 0);
+  if (dur > 0 && p.currentTime / dur >= FINISHED_AT) return false;
   return true;
 }
 
 /** True when a VOD was explicitly marked as watched or reached the finished threshold (>= 95%). */
-export function isWatchedVod(p: WatchProgress | undefined): boolean {
+export function isWatchedVod(p: WatchProgress | undefined, knownDuration = 0): boolean {
   if (!p || p.contentType !== "vod") return false;
   if (p.watched) return true;
-  return p.duration > 0 && p.currentTime / p.duration >= FINISHED_AT;
+  const dur = Math.max(p.duration || 0, knownDuration || 0);
+  // Guard against older entries that captured a short preroll ad duration (e.g. 15–30s).
+  if (dur < 60 && knownDuration === 0) return false;
+  return dur > 0 && p.currentTime / dur >= FINISHED_AT;
 }
 
 /** True for real live exit checkpoints (broadcast offset backed by `streamStartedAt` or YouTube `streamId`). */
